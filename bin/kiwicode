@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# kiwicode -- a minimal coding harness for the model llm-rig serves.
+#
+# Not opencode: a single-file MVP of the same idea. A conversation loop that
+# gives Qwen3.8-27B (as served by llama-swap) five tools -- read, write,
+# edit, ls, bash -- and lets it work on a task until it stops calling them.
+#
+# Tuned for THIS deployment rather than configurable:
+#   - endpoint:  http://127.0.0.1:${LLAMA_PORT:-8081}/v1/messages
+#   - model:     qwen3.8-27b (UD-Q4_K_M, tensor-split over both A4000s)
+#   - context:   8192 (the serving config's -c 8192; the harness budgets
+#                history against that ceiling instead of assuming more)
+#
+# The model is a reasoner: responses carry thinking blocks before the answer.
+# The loop feeds only text back as assistant content (a thinking block replayed
+# to the server is at best dead tokens and at worst an API error), prints the
+# thinking dimmed so you can follow along, and treats stop_reason=max_tokens as
+# a visible truncation warning rather than a silent one.
+
+set -uo pipefail
+source "$(dirname "$0")/../lib/kiwi.sh"
+
+kiwi_main "$@"
