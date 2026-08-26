@@ -1,0 +1,19 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shell dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq shellcheck
+      - name: Run syntax and lint checks
+        run: |
+          bash -n bin/kiwicode lib/kiwi.sh tests/test_kiwi.sh
+          shellcheck lib/kiwi.sh tests/test_kiwi.sh
+      - name: Run regression tests
+        run: bash tests/test_kiwi.sh

@@ -110,19 +110,40 @@ kiwi_extract_tool() {
   printf '%s' "${inner#<tool>}" | sed 's|</tool>$||'
 }
 
+kiwi_resolve_project_path() {
+  # $1 = requested path; $2 = existing or destination. Reject absolute paths,
+  # traversal, and symlinks that leave the selected project directory.
+  local requested="$1" kind="$2" parent base resolved
+  case "$requested" in
+    /*|..|../*|*/..|*/../*) return 1 ;;
+  esac
+
+  if [[ "$kind" == existing ]]; then
+    resolved="$(realpath -e -- "$requested" 2>/dev/null)" || return 1
+  else
+    parent="$(dirname -- "$requested")"
+    base="$(basename -- "$requested")"
+    resolved="$(realpath -e -- "$parent" 2>/dev/null)" || return 1
+    resolved="$resolved/$base"
+  fi
+  [[ "$resolved" == "$project_dir" || "$resolved" == "$project_dir/"* ]] || return 1
+  printf '%s' "$resolved"
+}
+
 kiwi_run_tool() (
   # $1 = tool JSON. Prints the result as plain text. Nothing executes until
   # the shape validates. Security posture is MVP: bash runs with full user
   # rights under `timeout`, gated by the system prompt's rules and by you
   # reading the transcript. Do not run it unattended on a machine you care
   # about.
-  local name cmd path content old new tmp project_dir
+  local name cmd path requested_path content old new tmp project_dir
   jq -e 'type == "object"' >/dev/null 2>&1 <<<"$1" \
     || { printf 'ERROR: tool call is not a JSON object'; return 0; }
   # Run every tool from the selected project. This matters for read/write/edit
   # and ls as much as it does for bash: callers commonly launch the harness
   # from somewhere other than the project it is operating on.
-  project_dir="${KIWI_PROJECT_DIR:-$PWD}"
+  project_dir="$(realpath -e -- "${KIWI_PROJECT_DIR:-$PWD}" 2>/dev/null)" \
+    || { printf 'ERROR: project directory does not exist: %s' "${KIWI_PROJECT_DIR:-$PWD}"; return 0; }
   [[ -d "$project_dir" ]] \
     || { printf 'ERROR: project directory does not exist: %s' "$project_dir"; return 0; }
   cd "$project_dir" \
@@ -137,35 +158,43 @@ kiwi_run_tool() (
     read)
       path="$(jq -r '.args.path // ""' <<<"$1")"
       [[ -n "$path" ]] || { printf 'ERROR: read needs args.path'; return 0; }
+      path="$(kiwi_resolve_project_path "$path" existing)" \
+        || { printf 'ERROR: path must stay within the project directory'; return 0; }
       [[ -f "$path" ]] || { printf 'ERROR: no such file: %s' "$path"; return 0; }
       cat "$path"
       ;;
     write)
       path="$(jq -r '.args.path // ""' <<<"$1")"
+      requested_path="$path"
       content="$(jq -r '.args.content // ""' <<<"$1")"
       [[ -n "$path" ]] || { printf 'ERROR: write needs args.path'; return 0; }
-      tmp="$(mktemp "$(dirname "$path")/.kiwi-write.XXXXXX")" \
-        || { printf 'ERROR: cannot write %s' "$path"; return 0; }
+      path="$(kiwi_resolve_project_path "$path" destination)" \
+        || { printf 'ERROR: path must stay within the project directory'; return 0; }
+      tmp="$(mktemp "$(dirname "$path")/.kiwi-write.XXXXXX" 2>/dev/null)" \
+        || { printf 'ERROR: cannot write %s' "$requested_path"; return 0; }
       if printf '%s' "$content" > "$tmp" && mv "$tmp" "$path"; then
-        printf 'wrote %s' "$path"
+        printf 'wrote %s' "$requested_path"
       else
         rm -f "$tmp"
-        printf 'ERROR: writing %s failed' "$path"
+        printf 'ERROR: writing %s failed' "$requested_path"
       fi
       ;;
     edit)
       path="$(jq -r '.args.path // ""' <<<"$1")"
+      requested_path="$path"
       old="$(jq -r '.args.old // ""' <<<"$1")"
       new="$(jq -r '.args.new // ""' <<<"$1")"
       if [[ -z "$path" || -z "$old" ]]; then
         printf 'ERROR: edit needs args.path and args.old'
+      elif ! path="$(kiwi_resolve_project_path "$path" existing)"; then
+        printf 'ERROR: path must stay within the project directory'
       elif [[ ! -f "$path" ]]; then
         printf 'ERROR: no such file: %s' "$path"
       elif ! grep -qF -- "$old" "$path"; then
         printf 'ERROR: old text not found in %s (must match exactly)' "$path"
       else
-        tmp="$(mktemp "$(dirname "$path")/.kiwi-edit.XXXXXX")" \
-          || { printf 'ERROR: cannot write %s' "$path"; return 0; }
+        tmp="$(mktemp "$(dirname "$path")/.kiwi-edit.XXXXXX" 2>/dev/null)" \
+          || { printf 'ERROR: cannot write %s' "$requested_path"; return 0; }
         if python3 - "$path" "$tmp" "$old" "$new" <<'PYEOF'
 import sys
 path, tmp, old, new = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
@@ -174,19 +203,21 @@ open(tmp, "w").write(text.replace(old, new, 1))
 PYEOF
         then
           if mv "$tmp" "$path"; then
-            printf 'edited %s' "$path"
+            printf 'edited %s' "$requested_path"
           else
             rm -f "$tmp"
-            printf 'ERROR: writing %s failed' "$path"
+            printf 'ERROR: writing %s failed' "$requested_path"
           fi
         else
           rm -f "$tmp"
-          printf 'ERROR: editing %s failed' "$path"
+          printf 'ERROR: editing %s failed' "$requested_path"
         fi
       fi
       ;;
     ls)
       path="$(jq -r '.args.path // "."' <<<"$1")"
+      path="$(kiwi_resolve_project_path "$path" existing)" \
+        || { printf 'ERROR: path must stay within the project directory'; return 0; }
       ls -la "$path" 2>&1
       ;;
     *)
@@ -294,6 +325,17 @@ kiwi_main() {
     messages="$(kiwi_trim_history "$messages")"
     if ! resp="$(kiwi_call "$messages")"; then
       die "request to $KIWI_BASE failed (is llama-swap up?)"
+    fi
+    if ! jq -e 'type == "object" and (.content | type == "array")' \
+        >/dev/null 2>&1 <<<"$resp"; then
+      local response_error
+      response_error="$(jq -r '.error.message // empty' 2>/dev/null <<<"$resp")"
+      if [[ -n "$response_error" ]]; then
+        c_err "model response error: $response_error"
+      else
+        c_err 'invalid response from model endpoint'
+      fi
+      return 1
     fi
 
     stop="$(kiwi_stop_reason <<<"$resp")"

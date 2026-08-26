@@ -41,7 +41,9 @@ newest turns that fit; the middle of a long session is dropped rather than
 letting the server truncate unpredictably.
 
 All relative tool paths are resolved from `KIWI_PROJECT_DIR`; absolute paths
-retain their normal shell meaning.
+and paths containing `..` are rejected. File tools also reject symlinks that
+resolve outside the project directory. The `bash` tool remains intentionally
+unrestricted under the MVP security posture described below.
 
 ## Tests
 
