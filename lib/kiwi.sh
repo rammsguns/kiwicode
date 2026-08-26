@@ -243,7 +243,43 @@ PYEOF
 
 # --- main loop ------------------------------------------------------------------
 
+kiwi_smoke_test() {
+  # Exercise the complete request/tool loop without touching the caller's
+  # project. A local llama-swap server must be running, just as for normal use.
+  local project_dir output status
+  local task='Create smoke.txt containing exactly smoke, then reply DONE with a one-sentence summary.'
+  project_dir="$(mktemp -d)" || die 'cannot create smoke-test directory'
+
+  output="$(KIWI_PROJECT_DIR="$project_dir" \
+    KIWI_MAX_TURNS="${KIWI_SMOKE_MAX_TURNS:-5}" kiwi_main "$task")"
+  status=$?
+
+  if (( status != 0 )); then
+    rm -rf -- "$project_dir"
+    return "$status"
+  fi
+  if [[ "$output" != DONE* ]]; then
+    rm -rf -- "$project_dir"
+    c_err 'smoke test did not receive a DONE response'
+    return 1
+  fi
+  if [[ ! -f "$project_dir/smoke.txt" \
+        || $(wc -c < "$project_dir/smoke.txt") -ne 5 \
+        || $(<"$project_dir/smoke.txt") != smoke ]]; then
+    rm -rf -- "$project_dir"
+    c_err 'smoke test did not create the expected smoke.txt'
+    return 1
+  fi
+
+  rm -rf -- "$project_dir"
+  c_ok 'smoke test passed'
+}
+
 kiwi_main() {
+  if [[ "${1:-}" == '--smoke-test' ]]; then
+    kiwi_smoke_test
+    return
+  fi
   [[ -n "${1:-}" ]] || { printf 'usage: kiwicode "<task>"\n' >&2; exit 2; }
   command -v jq >/dev/null || die "jq not found"
 

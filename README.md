@@ -51,6 +51,16 @@ Run the regression suite with:
 bash tests/test_kiwi.sh
 ```
 
+With llama-swap running, exercise the complete agent loop against a temporary
+project (which is removed afterward) with:
+
+```bash
+bin/kiwicode --smoke-test
+```
+
+Set `KIWI_SMOKE_MAX_TURNS` to increase the smoke test's five-turn allowance if
+the model needs more verification turns.
+
 ## Tuning notes for Qwen3.8-27B (what the MVP learned)
 
 - **One tool call per reply, entire reply.** Shown once with a worked example
