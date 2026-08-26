@@ -110,26 +110,34 @@ kiwi_extract_tool() {
   printf '%s' "${inner#<tool>}" | sed 's|</tool>$||'
 }
 
-kiwi_run_tool() {
+kiwi_run_tool() (
   # $1 = tool JSON. Prints the result as plain text. Nothing executes until
   # the shape validates. Security posture is MVP: bash runs with full user
   # rights under `timeout`, gated by the system prompt's rules and by you
   # reading the transcript. Do not run it unattended on a machine you care
   # about.
-  local name cmd path content old new tmp
+  local name cmd path content old new tmp project_dir
   jq -e 'type == "object"' >/dev/null 2>&1 <<<"$1" \
     || { printf 'ERROR: tool call is not a JSON object'; return 0; }
+  # Run every tool from the selected project. This matters for read/write/edit
+  # and ls as much as it does for bash: callers commonly launch the harness
+  # from somewhere other than the project it is operating on.
+  project_dir="${KIWI_PROJECT_DIR:-$PWD}"
+  [[ -d "$project_dir" ]] \
+    || { printf 'ERROR: project directory does not exist: %s' "$project_dir"; return 0; }
+  cd "$project_dir" \
+    || { printf 'ERROR: cannot enter project directory: %s' "$project_dir"; return 0; }
   name="$(jq -r '.name // ""' <<<"$1")"
   case "$name" in
     bash)
       cmd="$(jq -r '.args.cmd // ""' <<<"$1")"
       [[ -n "$cmd" ]] || { printf 'ERROR: bash needs args.cmd'; return 0; }
-      ( cd "${KIWI_PROJECT_DIR:-$PWD}" && timeout 120 bash -c "$cmd" 2>&1 )
+      timeout 120 bash -c "$cmd" 2>&1
       ;;
     read)
       path="$(jq -r '.args.path // ""' <<<"$1")"
       [[ -n "$path" ]] || { printf 'ERROR: read needs args.path'; return 0; }
-      [[ -f "$path" ]] || { printf "ERROR: no such file: $path"; return 0; }
+      [[ -f "$path" ]] || { printf 'ERROR: no such file: %s' "$path"; return 0; }
       cat "$path"
       ;;
     write)
@@ -137,10 +145,13 @@ kiwi_run_tool() {
       content="$(jq -r '.args.content // ""' <<<"$1")"
       [[ -n "$path" ]] || { printf 'ERROR: write needs args.path'; return 0; }
       tmp="$(mktemp "$(dirname "$path")/.kiwi-write.XXXXXX")" \
-        || { printf "ERROR: cannot write $path"; return 0; }
-      printf '%s' "$content" > "$tmp" && mv "$tmp" "$path" \
-        || { rm -f "$tmp"; printf "ERROR: writing $path failed"; return 0; }
-      printf "wrote $path"
+        || { printf 'ERROR: cannot write %s' "$path"; return 0; }
+      if printf '%s' "$content" > "$tmp" && mv "$tmp" "$path"; then
+        printf 'wrote %s' "$path"
+      else
+        rm -f "$tmp"
+        printf 'ERROR: writing %s failed' "$path"
+      fi
       ;;
     edit)
       path="$(jq -r '.args.path // ""' <<<"$1")"
@@ -149,17 +160,29 @@ kiwi_run_tool() {
       if [[ -z "$path" || -z "$old" ]]; then
         printf 'ERROR: edit needs args.path and args.old'
       elif [[ ! -f "$path" ]]; then
-        printf "ERROR: no such file: $path"
+        printf 'ERROR: no such file: %s' "$path"
       elif ! grep -qF -- "$old" "$path"; then
-        printf "ERROR: old text not found in $path (must match exactly)"
+        printf 'ERROR: old text not found in %s (must match exactly)' "$path"
       else
-        python3 - "$path" "$old" "$new" <<'PYEOF'
+        tmp="$(mktemp "$(dirname "$path")/.kiwi-edit.XXXXXX")" \
+          || { printf 'ERROR: cannot write %s' "$path"; return 0; }
+        if python3 - "$path" "$tmp" "$old" "$new" <<'PYEOF'
 import sys
-path, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+path, tmp, old, new = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 text = open(path).read()
-open(path, "w").write(text.replace(old, new, 1))
+open(tmp, "w").write(text.replace(old, new, 1))
 PYEOF
-        printf "edited $path"
+        then
+          if mv "$tmp" "$path"; then
+            printf 'edited %s' "$path"
+          else
+            rm -f "$tmp"
+            printf 'ERROR: writing %s failed' "$path"
+          fi
+        else
+          rm -f "$tmp"
+          printf 'ERROR: editing %s failed' "$path"
+        fi
       fi
       ;;
     ls)
@@ -167,10 +190,10 @@ PYEOF
       ls -la "$path" 2>&1
       ;;
     *)
-      printf "ERROR: unknown tool: $name"
+      printf 'ERROR: unknown tool: %s' "$name"
       ;;
   esac
-}
+)
 
 # --- history management --------------------------------------------------------
 
@@ -193,6 +216,17 @@ kiwi_trim_history() {
 import json, sys
 msgs = json.loads(sys.argv[1]); budget = int(sys.argv[2])
 def cost(m): return len(m["content"]) // 4
+if cost(msgs[0]) > budget:
+    # The initial task is important, but it cannot be allowed to make the
+    # request exceed the configured context budget by itself.
+    marker = "\n...[task truncated to fit context budget]"
+    allowed = max(0, budget * 4)
+    first = dict(msgs[0])
+    if allowed <= len(marker):
+        first["content"] = marker[:allowed]
+    else:
+        first["content"] = first["content"][:allowed - len(marker)] + marker
+    print(json.dumps([first])); sys.exit(0)
 if sum(cost(m) for m in msgs) <= budget:
     print(json.dumps(msgs)); sys.exit(0)
 first, rest = msgs[0], msgs[1:]

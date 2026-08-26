@@ -30,15 +30,26 @@ server.
 | tool | args | notes |
 |------|------|-------|
 | `bash`  | `cmd` | runs in `KIWI_PROJECT_DIR`, 120s timeout |
-| `read`  | `path` | whole file |
-| `write` | `path`, `content` | create/replace via atomic tmp+mv |
-| `edit`  | `path`, `old`, `new` | first exact occurrence |
-| `ls`    | `path` | directory listing |
+| `read`  | `path` | whole file in `KIWI_PROJECT_DIR` |
+| `write` | `path`, `content` | create/replace atomically in `KIWI_PROJECT_DIR` |
+| `edit`  | `path`, `old`, `new` | first exact occurrence in `KIWI_PROJECT_DIR` |
+| `ls`    | `path` | directory listing in `KIWI_PROJECT_DIR` |
 
 Tool results are capped at `KIWI_RESULT_CAP` (8000 chars) so one giant read
 cannot eat the context window. History keeps the task definition plus the
 newest turns that fit; the middle of a long session is dropped rather than
 letting the server truncate unpredictably.
+
+All relative tool paths are resolved from `KIWI_PROJECT_DIR`; absolute paths
+retain their normal shell meaning.
+
+## Tests
+
+Run the regression suite with:
+
+```bash
+bash tests/test_kiwi.sh
+```
 
 ## Tuning notes for Qwen3.8-27B (what the MVP learned)
 
